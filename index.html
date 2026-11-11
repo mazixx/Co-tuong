@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10271f">
+
+  <title>Kỳ Đạo • Cờ Tướng</title>
+
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+
+<body>
+  <canvas id="scene" aria-hidden="true"></canvas>
+
+  <header>
+    <h1>KỲ ĐẠO • CỜ TƯỚNG</h1>
+    <p>Người chơi quân Đỏ • Mỗi bên 10 phút</p>
+
+    <div id="loading" role="status">
+      Đang tải Python cho trình duyệt…
+    </div>
+
+    <div id="error" role="alert"></div>
+  </header>
+
+  <main>
+    <section class="board-column">
+      <div id="blackClock" class="clock">
+        <span>將 MÁY • QUÂN ĐEN</span>
+        <strong id="blackTime">10:00</strong>
+      </div>
+
+      <canvas id="board"
+              width="1120"
+              height="1220"
+              aria-label="Bàn cờ tướng">
+      </canvas>
+
+      <div id="redClock" class="clock">
+        <span>帥 BẠN • QUÂN ĐỎ</span>
+        <strong id="redTime">10:00</strong>
+      </div>
+    </section>
+
+    <aside>
+      <label>
+        Cấp độ — thay đổi sẽ tạo ván mới
+        <select id="level" disabled>
+          <option value="0">1. Kỳ thủ</option>
+          <option value="1">2. Kỳ sỹ</option>
+          <option value="2">3. Đại sư</option>
+        </select>
+      </label>
+
+      <div class="controls">
+        <button id="new" disabled>Ván mới</button>
+        <button id="pause" disabled>Tạm dừng</button>
+        <button id="theme" disabled>Đổi nền</button>
+        <button id="undo" disabled>Xin đi lại (2)</button>
+        <button id="draw" disabled>Cầu hòa</button>
+        <button id="resign" disabled>Xin thua</button>
+      </div>
+
+      <section class="panel">
+        <h2 id="message">Đang chuẩn bị bàn cờ…</h2>
+        <p id="note"></p>
+        <strong id="evaluation"></strong>
+      </section>
+
+      <section class="panel">
+        <h3>LỊCH SỬ NƯỚC ĐI</h3>
+        <pre id="history">Chưa có nước đi.</pre>
+      </section>
+
+      <section class="panel">
+        <h3>QUÂN SƯ • GỢI Ý</h3>
+        <p id="hint">Gợi ý sau 30 giây suy nghĩ.</p>
+        <p id="aiInfo"></p>
+        <p id="themeName"></p>
+      </section>
+
+      <p class="help">
+        Chạm quân Đỏ rồi chạm điểm đến.<br>
+        Chấm xanh: đi được • Dấu X: cấm lặp thế lần thứ ba.<br>
+        Mũi tên xanh: gợi ý • Viền đỏ quanh Tướng: bị chiếu.
+      </p>
+
+      <p class="help">
+        AI chưa được xác thực Elo. Tải lại trang sẽ mất ván.
+        Trang hiện hỗ trợ chơi với bot, không phải nhiều người online.
+      </p>
+    </aside>
+  </main>
+</body>
+</html>
