@@ -1,0 +1,152 @@
+name: Deploy Co Tuong Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Lay ma nguon
+        uses: actions/checkout@v4
+
+      - name: Cai Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Kiem tra file nguon
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in \
+            co_tuong_original.txt \
+            build_engine.py \
+            web_controller.py \
+            worker.js \
+            index.html \
+            style.css \
+            app.js
+          do
+            if [ ! -s "$file" ]; then
+              echo "::error::Thieu file hoac file rong: $file"
+              exit 1
+            fi
+          done
+
+      - name: Tao engine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python build_engine.py
+          test -s engine.py
+
+          python -m py_compile engine.py web_controller.py
+
+          node --check app.js
+          node --check worker.js
+
+      - name: Kiem tra luat va mot luot AI
+        run: |
+          python - <<'PY'
+          import json
+
+          import engine as e
+          import web_controller as web
+
+          def call(request):
+              result = web.api(json.dumps(request))
+              return json.loads(result)["state"]
+
+          board = e.initial_board()
+          moves = e.legal_moves(board, e.RED)
+
+          assert len(moves) == 44, (
+              "So nuoc hop le ban dau khong dung"
+          )
+
+          state = call({"op": "new", "level": 0})
+
+          assert state["turn"] == e.RED
+          assert not state["finished"]
+
+          move = state["moves"][0]
+
+          state = call({
+              "op": "move",
+              "move": move
+          })
+
+          assert state["turn"] == e.BLACK
+          assert len(state["history"]) == 1
+
+          state = call({"op": "ai"})
+
+          assert not state["finished"], state["message"]
+          assert state["turn"] == e.RED
+          assert len(state["history"]) == 2
+
+          state = call({
+              "op": "pause",
+              "value": True
+          })
+
+          assert state["paused"]
+
+          print("Luat co, luot AI va tam dung: OK")
+          PY
+
+      - name: Chuan bi website
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf _site
+          mkdir -p _site
+
+          cp index.html style.css app.js worker.js _site/
+          cp engine.py web_controller.py _site/
+
+          touch _site/.nojekyll
+
+          test -s _site/engine.py
+          test -s _site/web_controller.py
+
+          echo "File duoc xuat ban:"
+          ls -lah _site
+
+      - name: Cau hinh Pages
+        uses: actions/configure-pages@v5
+
+      - name: Tai website len
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Xuat ban Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
