@@ -1,0 +1,1904 @@
+import os
+import math
+import time
+import random
+import queue
+import threading
+from collections import Counter
+
+import pygame
+
+
+# ============================================================
+# CẤU HÌNH
+# ============================================================
+
+WIDTH, HEIGHT = 1200, 800
+OX, OY, CELL = 65, 120, 60
+
+RED, BLACK = 1, -1
+KING, ADVISOR, ELEPHANT, HORSE, ROOK, CANNON, PAWN = range(1, 8)
+
+TOTAL_TIME = 600
+HINT_AFTER = 30
+MAX_UNDO = 2
+
+INF = 10_000_000
+MATE = 1_000_000
+
+VALUES = {
+    KING: 100000,
+    ADVISOR: 200,
+    ELEPHANT: 200,
+    HORSE: 420,
+    ROOK: 900,
+    CANNON: 450,
+    PAWN: 100,
+}
+
+VI = {
+    KING: "Tướng",
+    ADVISOR: "Sĩ",
+    ELEPHANT: "Tượng",
+    HORSE: "Mã",
+    ROOK: "Xe",
+    CANNON: "Pháo",
+    PAWN: "Binh",
+}
+
+SHORT = {
+    KING: "Tg", ADVISOR: "S", ELEPHANT: "T",
+    HORSE: "M", ROOK: "X", CANNON: "P", PAWN: "B",
+}
+
+HAN = {
+    RED: {
+        KING: "帥", ADVISOR: "仕", ELEPHANT: "相",
+        HORSE: "馬", ROOK: "車", CANNON: "炮", PAWN: "兵",
+    },
+    BLACK: {
+        KING: "將", ADVISOR: "士", ELEPHANT: "象",
+        HORSE: "馬", ROOK: "車", CANNON: "砲", PAWN: "卒",
+    },
+}
+
+LEVELS = [
+    ("1. Kỳ thủ", 2, 0.8),
+    ("2. Kỳ sỹ", 4, 2.5),
+    ("3. Đại sư", 6, 5.0),
+]
+
+# Tên, màu trời trên, màu trời dưới, màu núi, màu nhấn, kiểu cảnh.
+THEMES = [
+    ("Trúc Lâm", (8, 38, 32), (37, 91, 63),
+     (14, 58, 45), (157, 200, 125), "bamboo"),
+
+    ("Thanh Sơn", (24, 59, 77), (105, 156, 148),
+     (40, 95, 98), (200, 231, 209), "mountain"),
+
+    ("Hoàng Hôn", (85, 44, 66), (220, 135, 85),
+     (76, 57, 80), (255, 208, 126), "sunset"),
+
+    ("Nguyệt Dạ", (8, 15, 39), (38, 58, 87),
+     (23, 35, 61), (208, 221, 249), "night"),
+
+    ("Anh Đào", (77, 51, 70), (181, 130, 141),
+     (94, 77, 99), (255, 199, 215), "sakura"),
+
+    ("Thủy Mặc", (91, 104, 106), (184, 190, 176),
+     (68, 88, 87), (239, 229, 197), "ink"),
+
+    ("Thu Vàng", (68, 44, 26), (156, 109, 53),
+     (77, 68, 37), (255, 206, 99), "autumn"),
+
+    ("Tuyết Sơn", (44, 72, 98), (154, 185, 194),
+     (76, 111, 137), (240, 248, 251), "snow"),
+
+    ("Bích Hải", (7, 50, 72), (32, 133, 147),
+     (17, 80, 99), (166, 235, 219), "sea"),
+
+    ("Tử Vân", (38, 24, 65), (112, 82, 146),
+     (62, 42, 91), (223, 193, 250), "purple"),
+]
+
+
+# ============================================================
+# LUẬT CỜ
+# ============================================================
+
+def initial_board():
+    return [
+        [-ROOK, -HORSE, -ELEPHANT, -ADVISOR, -KING,
+         -ADVISOR, -ELEPHANT, -HORSE, -ROOK],
+        [0] * 9,
+        [0, -CANNON, 0, 0, 0, 0, 0, -CANNON, 0],
+        [-PAWN, 0, -PAWN, 0, -PAWN, 0, -PAWN, 0, -PAWN],
+        [0] * 9,
+        [0] * 9,
+        [PAWN, 0, PAWN, 0, PAWN, 0, PAWN, 0, PAWN],
+        [0, CANNON, 0, 0, 0, 0, 0, CANNON, 0],
+        [0] * 9,
+        [ROOK, HORSE, ELEPHANT, ADVISOR, KING,
+         ADVISOR, ELEPHANT, HORSE, ROOK],
+    ]
+
+
+def inside(r, c):
+    return 0 <= r < 10 and 0 <= c < 9
+
+
+def palace(r, c, side):
+    return (
+        3 <= c <= 5
+        and (7 <= r <= 9 if side == RED else 0 <= r <= 2)
+    )
+
+
+def crossed(r, side):
+    return r <= 4 if side == RED else r >= 5
+
+
+def find_king(board, side):
+    for r in range(10):
+        for c in range(9):
+            if board[r][c] == side * KING:
+                return r, c
+    return None
+
+
+def targets(board, r, c):
+    """Cách đi của quân, chưa kiểm tra tự chiếu."""
+    piece = board[r][c]
+    if not piece:
+        return []
+
+    side = RED if piece > 0 else BLACK
+    kind = abs(piece)
+    result = []
+
+    def add(nr, nc):
+        if inside(nr, nc) and board[nr][nc] * side <= 0:
+            result.append((nr, nc))
+
+    if kind == KING:
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = r + dr, c + dc
+            if palace(nr, nc, side):
+                add(nr, nc)
+
+        # Tướng đối mặt.
+        for dr in (-1, 1):
+            nr = r + dr
+            while inside(nr, c):
+                if board[nr][c]:
+                    if board[nr][c] == -side * KING:
+                        result.append((nr, c))
+                    break
+                nr += dr
+
+    elif kind == ADVISOR:
+        for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            nr, nc = r + dr, c + dc
+            if palace(nr, nc, side):
+                add(nr, nc)
+
+    elif kind == ELEPHANT:
+        for dr, dc in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
+            nr, nc = r + dr, c + dc
+            if not inside(nr, nc):
+                continue
+            if side == RED and nr < 5:
+                continue
+            if side == BLACK and nr > 4:
+                continue
+            if board[r + dr // 2][c + dc // 2] == 0:
+                add(nr, nc)
+
+    elif kind == HORSE:
+        steps = [
+            (-2, -1, -1, 0), (-2, 1, -1, 0),
+            (2, -1, 1, 0), (2, 1, 1, 0),
+            (-1, -2, 0, -1), (1, -2, 0, -1),
+            (-1, 2, 0, 1), (1, 2, 0, 1),
+        ]
+        for dr, dc, lr, lc in steps:
+            nr, nc = r + dr, c + dc
+            if inside(nr, nc) and board[r + lr][c + lc] == 0:
+                add(nr, nc)
+
+    elif kind in (ROOK, CANNON):
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = r + dr, c + dc
+            screen_found = False
+
+            while inside(nr, nc):
+                target = board[nr][nc]
+
+                if kind == ROOK:
+                    if target == 0:
+                        result.append((nr, nc))
+                    else:
+                        if target * side < 0:
+                            result.append((nr, nc))
+                        break
+                else:
+                    if not screen_found:
+                        if target == 0:
+                            result.append((nr, nc))
+                        else:
+                            screen_found = True
+                    elif target:
+                        if target * side < 0:
+                            result.append((nr, nc))
+                        break
+
+                nr += dr
+                nc += dc
+
+    elif kind == PAWN:
+        add(r - 1 if side == RED else r + 1, c)
+        if crossed(r, side):
+            add(r, c - 1)
+            add(r, c + 1)
+
+    return result
+
+
+def in_check(board, side):
+    king = find_king(board, side)
+    if king is None:
+        return True
+
+    for r in range(10):
+        for c in range(9):
+            if board[r][c] * side < 0:
+                if king in targets(board, r, c):
+                    return True
+    return False
+
+
+def make_move(board, move):
+    r1, c1, r2, c2 = move
+    captured = board[r2][c2]
+    board[r2][c2] = board[r1][c1]
+    board[r1][c1] = 0
+    return captured
+
+
+def unmake_move(board, move, captured):
+    r1, c1, r2, c2 = move
+    board[r1][c1] = board[r2][c2]
+    board[r2][c2] = captured
+
+
+def position_key(board, side):
+    return tuple(v for row in board for v in row), side
+
+
+def legal_moves(board, side, counts=None):
+    """
+    counts: lịch sử số lần xuất hiện thế cờ.
+    Nếu có counts, cấm nước tạo thế lặp lần thứ ba.
+    """
+    if find_king(board, side) is None:
+        return []
+
+    moves = []
+
+    for r in range(10):
+        for c in range(9):
+            if board[r][c] * side <= 0:
+                continue
+
+            for nr, nc in targets(board, r, c):
+                move = (r, c, nr, nc)
+                captured = make_move(board, move)
+
+                valid = not in_check(board, side)
+
+                if valid and counts is not None:
+                    key = position_key(board, -side)
+                    valid = counts.get(key, 0) < 2
+
+                unmake_move(board, move, captured)
+
+                if valid:
+                    moves.append(move)
+
+    return moves
+
+
+def move_name(board, move):
+    r1, c1, r2, c2 = move
+    name = VI[abs(board[r1][c1])]
+    action = "ăn" if board[r2][c2] else "→"
+
+    return (
+        f"{name} {chr(65 + c1)}{r1} "
+        f"{action} {chr(65 + c2)}{r2}"
+    )
+
+
+def evaluate(board, side=RED):
+    total = 0
+
+    for r in range(10):
+        for c in range(9):
+            piece = board[r][c]
+            if not piece:
+                continue
+
+            owner = RED if piece > 0 else BLACK
+            kind = abs(piece)
+            value = VALUES[kind]
+
+            advance = 9 - r if owner == RED else r
+            center = 4 - abs(c - 4)
+
+            if kind == PAWN:
+                value += advance * 8
+                if crossed(r, owner):
+                    value += 70 + center * 10
+
+            elif kind == HORSE:
+                value += center * 12 + min(advance, 6) * 4
+                if r in (0, 9):
+                    value -= 20
+
+            elif kind == CANNON:
+                value += center * 7 + min(advance, 5) * 3
+
+            elif kind == ROOK:
+                value += center * 4 + min(advance, 7) * 3
+
+            total += owner * value
+
+    return total * side
+
+
+# ============================================================
+# ENGINE AI
+# ============================================================
+
+class SearchStopped(Exception):
+    pass
+
+
+class Engine:
+    def __init__(self, seconds, cancel):
+        self.deadline = time.perf_counter() + seconds
+        self.cancel = cancel
+        self.nodes = 0
+
+    def check(self):
+        if self.cancel.is_set() or time.perf_counter() >= self.deadline:
+            raise SearchStopped()
+
+    def ordered(self, board, moves, preferred=None):
+        def priority(move):
+            r1, c1, r2, c2 = move
+            victim = board[r2][c2]
+            attacker = board[r1][c1]
+
+            value = 0
+            if victim:
+                value += 10000 + VALUES[abs(victim)] * 10
+                value -= VALUES[abs(attacker)]
+            if move == preferred:
+                value += 10000000
+            return value
+
+        return sorted(moves, key=priority, reverse=True)
+
+    def search_node(self, board, side, depth, alpha, beta,
+                    ply, counts, quiet_left=1):
+        self.check()
+        self.nodes += 1
+
+        moves = legal_moves(board, side, counts)
+
+        if not moves:
+            return -MATE + ply
+
+        if depth <= 0:
+            score = evaluate(board, side)
+
+            if quiet_left <= 0:
+                return score
+
+            if not in_check(board, side):
+                if score >= beta:
+                    return score
+                alpha = max(alpha, score)
+                moves = [m for m in moves if board[m[2]][m[3]]]
+                if not moves:
+                    return alpha
+
+        for move in self.ordered(board, moves):
+            self.check()
+            captured = make_move(board, move)
+            key = position_key(board, -side)
+            counts[key] += 1
+
+            try:
+                value = -self.search_node(
+                    board, -side, depth - 1,
+                    -beta, -alpha, ply + 1, counts,
+                    quiet_left - 1 if depth <= 0 else quiet_left
+                )
+            finally:
+                counts[key] -= 1
+                if counts[key] == 0:
+                    del counts[key]
+                unmake_move(board, move, captured)
+
+            if value >= beta:
+                return value
+
+            alpha = max(alpha, value)
+
+        return alpha
+
+    def search(self, board, side, max_depth, counts, exact=False):
+        counts = counts.copy()
+        moves = legal_moves(board, side, counts)
+
+        if not moves:
+            return None, None, 0, {}
+
+        best_move = self.ordered(board, moves)[0]
+        best_score = None
+        completed_depth = 0
+        completed_scores = {}
+
+        for depth in range(1, max_depth + 1):
+            scores = {}
+            alpha = -INF
+
+            try:
+                for move in self.ordered(board, moves, best_move):
+                    self.check()
+                    captured = make_move(board, move)
+                    key = position_key(board, -side)
+                    counts[key] += 1
+
+                    try:
+                        score = -self.search_node(
+                            board, -side, depth - 1,
+                            -INF, INF if exact else -alpha,
+                            1, counts
+                        )
+                    finally:
+                        counts[key] -= 1
+                        if counts[key] == 0:
+                            del counts[key]
+                        unmake_move(board, move, captured)
+
+                    scores[move] = score
+                    alpha = max(alpha, score)
+
+            except SearchStopped:
+                break
+
+            best_move = max(scores, key=scores.get)
+            best_score = scores[best_move]
+            completed_depth = depth
+            completed_scores = scores
+
+            if best_score > MATE - 100:
+                break
+
+        return best_move, best_score, completed_depth, completed_scores
+
+
+def grade_move(before, move, counts, cancel):
+    engine = Engine(0.8, cancel)
+    _, score, depth, scores = engine.search(
+        before, RED, 2, counts, exact=True
+    )
+
+    if score is None or move not in scores:
+        return "Chưa đủ thời gian để chấm nước."
+
+    loss = max(0, score - scores[move])
+
+    if loss <= 25:
+        name = "Gần tốt nhất"
+    elif loss <= 90:
+        name = "Khá tốt"
+    elif loss <= 200:
+        name = "Chưa chính xác"
+    elif loss <= 400:
+        name = "Sai sót"
+    else:
+        name = "Sai lầm lớn"
+
+    if loss > MATE // 2:
+        return f"{name} · bỏ lỡ hoặc rơi vào biến quyết định"
+
+    return f"{name} · hụt ~{loss / 100:.1f} binh · d{depth}"
+
+
+# ============================================================
+# KHỞI TẠO ĐỒ HỌA VÀ FONT
+# ============================================================
+
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Kỳ Đạo - Cờ tướng 10 phút")
+
+
+def find_font(names):
+    for name in names:
+        path = pygame.font.match_font(name)
+        if path:
+            return path
+    return None
+
+
+ui_path = find_font([
+    "segoeui", "arial", "dejavusans", "liberationsans"
+])
+
+folder = os.path.dirname(os.path.abspath(__file__))
+custom_han = os.path.join(folder, "co_tuong_font.ttf")
+
+han_path = (
+    custom_han if os.path.isfile(custom_han)
+    else find_font([
+        "microsoftyahei", "microsoftyaheiu",
+        "simhei", "simsun",
+        "notosanscjksc", "notosanscjktc",
+        "notoserifcjksc", "pingfangsc",
+        "wenquanyizenhei", "arialunicodems",
+    ])
+)
+
+FONT = pygame.font.Font(ui_path, 19)
+SMALL = pygame.font.Font(ui_path, 16)
+TINY = pygame.font.Font(ui_path, 14)
+TITLE = pygame.font.Font(ui_path, 29)
+TIME_FONT = pygame.font.Font(ui_path, 34)
+TIME_FONT.set_bold(True)
+
+HAN_FONT = pygame.font.Font(han_path or ui_path, 35)
+RIVER_FONT = pygame.font.Font(han_path or ui_path, 27)
+
+GOLD = (231, 204, 132)
+CREAM = (252, 239, 197)
+TEXT = (244, 239, 219)
+MUTED = (185, 200, 185)
+GREEN = (128, 226, 169)
+
+LEVEL_RECTS = [
+    pygame.Rect(605 + i * 190, 65, 180, 40)
+    for i in range(3)
+]
+
+NEW_RECT = pygame.Rect(605, 118, 180, 40)
+DRAW_RECT = pygame.Rect(795, 118, 180, 40)
+RESIGN_RECT = pygame.Rect(985, 118, 180, 40)
+
+PAUSE_RECT = pygame.Rect(605, 171, 180, 40)
+UNDO_RECT = pygame.Rect(795, 171, 180, 40)
+BG_RECT = pygame.Rect(985, 171, 180, 40)
+
+HISTORY_RECT = pygame.Rect(605, 373, 560, 216)
+
+
+def mix(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def text(message, x, y, color=TEXT, font=FONT, center=False):
+    image = font.render(str(message), True, color)
+    rect = image.get_rect()
+    if center:
+        rect.center = (x, y)
+    else:
+        rect.topleft = (x, y)
+    screen.blit(image, rect)
+
+
+def wrapped(message, x, y, width, color=TEXT, font=SMALL,
+            line_h=22, max_lines=3):
+    lines = []
+    current = ""
+
+    for word in str(message).split():
+        candidate = f"{current} {word}".strip()
+        if font.size(candidate)[0] > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+
+    if current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] += "..."
+
+    for line in lines:
+        text(line, x, y, color, font)
+        y += line_h
+
+    return y
+
+
+def panel(rect, color=(18, 38, 30), alpha=235):
+    layer = pygame.Surface(rect.size, pygame.SRCALPHA)
+    pygame.draw.rect(
+        layer, (*color, alpha), layer.get_rect(), border_radius=12
+    )
+    screen.blit(layer, rect)
+    pygame.draw.rect(
+        screen, (119, 133, 86), rect, 1, border_radius=12
+    )
+
+
+def button(rect, message, color, enabled=True, selected=False):
+    if not enabled:
+        color = (49, 57, 51)
+    elif rect.collidepoint(pygame.mouse.get_pos()):
+        color = mix(color, (255, 255, 230), 0.13)
+
+    pygame.draw.rect(
+        screen, (9, 20, 17), rect.move(0, 3), border_radius=9
+    )
+    pygame.draw.rect(screen, color, rect, border_radius=9)
+    pygame.draw.rect(
+        screen, GOLD if selected else (115, 126, 91),
+        rect, 2 if selected else 1, border_radius=9
+    )
+    text(
+        message, *rect.center,
+        TEXT if enabled else (133, 143, 135),
+        SMALL, center=True
+    )
+
+
+def board_xy(r, c):
+    return OX + c * CELL, OY + r * CELL
+
+
+def mouse_square(pos):
+    x, y = pos
+    c = round((x - OX) / CELL)
+    r = round((y - OY) / CELL)
+
+    if not inside(r, c):
+        return None
+
+    px, py = board_xy(r, c)
+    if math.hypot(x - px, y - py) <= 28:
+        return r, c
+    return None
+
+
+def time_string(seconds):
+    seconds = max(0, math.ceil(seconds))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def draw_arrow(move):
+    r1, c1, r2, c2 = move
+    start = pygame.Vector2(board_xy(r1, c1))
+    end = pygame.Vector2(board_xy(r2, c2))
+    direction = end - start
+
+    if direction.length() == 0:
+        return
+
+    direction = direction.normalize()
+    start += direction * 27
+    end -= direction * 14
+    perpendicular = pygame.Vector2(-direction.y, direction.x)
+
+    color = (29, 146, 83)
+    pygame.draw.line(screen, color, start, end, 6)
+    pygame.draw.polygon(
+        screen, color,
+        [
+            end,
+            end - direction * 18 + perpendicular * 10,
+            end - direction * 18 - perpendicular * 10,
+        ]
+    )
+
+
+# ============================================================
+# TẠO 10 NỀN KHÔNG CẦN FILE ẢNH
+# ============================================================
+
+def make_background(index):
+    _, top, bottom, mountain, accent, kind = THEMES[index]
+    rng = random.Random(1307 + index)
+    image = pygame.Surface((WIDTH, HEIGHT))
+
+    for y in range(HEIGHT):
+        pygame.draw.line(
+            image, mix(top, bottom, y / HEIGHT),
+            (0, y), (WIDTH, y)
+        )
+
+    if kind in ("sunset", "night", "purple", "sea", "snow"):
+        glow = pygame.Surface((300, 300), pygame.SRCALPHA)
+        for radius in range(145, 40, -8):
+            pygame.draw.circle(
+                glow, (*accent, 12), (150, 150), radius
+            )
+        pygame.draw.circle(glow, (*accent, 220), (150, 150), 39)
+        image.blit(glow, (WIDTH - 340, 0))
+
+    if kind in ("night", "purple"):
+        for _ in range(100):
+            pygame.draw.circle(
+                image, accent,
+                (rng.randrange(WIDTH), rng.randrange(HEIGHT // 2)),
+                rng.choice((1, 1, 2))
+            )
+
+    for layer in range(5):
+        points = [(-80, HEIGHT)]
+        for x in range(-80, WIDTH + 100, 70):
+            y = (
+                210 + layer * 100
+                + math.sin(x * 0.007 + layer * 1.3) * 60
+                + rng.randint(-65, 65)
+            )
+            points.append((x, int(y)))
+        points.append((WIDTH + 100, HEIGHT))
+
+        color = mix(mountain, bottom, 0.38 - layer * 0.07)
+        pygame.draw.polygon(image, color, points)
+
+        if kind == "snow" and layer < 2:
+            for i in range(2, len(points) - 2):
+                x, y = points[i]
+                if y < points[i - 1][1] and y < points[i + 1][1]:
+                    pygame.draw.polygon(
+                        image, (205, 223, 230),
+                        [(x, y), (x - 25, y + 31), (x + 30, y + 35)]
+                    )
+
+    if kind == "sea":
+        for y in range(450, HEIGHT, 13):
+            pygame.draw.line(
+                image, mix(bottom, accent, 0.23),
+                (rng.randrange(0, 200), y), (WIDTH, y), 1
+            )
+
+    if kind in ("bamboo", "ink", "mountain"):
+        for _ in range(18):
+            x = rng.choice([
+                rng.randint(-30, 140),
+                rng.randint(WIDTH - 190, WIDTH + 20)
+            ])
+            lean = rng.randint(-80, 80)
+            width = rng.randint(8, 19)
+            color = mix(mountain, accent, rng.uniform(0.12, 0.35))
+
+            pygame.draw.line(
+                image, color,
+                (x, HEIGHT + 30), (x + lean, -30), width
+            )
+            pygame.draw.line(
+                image, mix(color, accent, 0.2),
+                (x - 2, HEIGHT), (x + lean - 2, 0), 2
+            )
+
+            for y in range(30, HEIGHT, 90):
+                xx = x + lean * (1 - y / HEIGHT)
+
+                pygame.draw.line(
+                    image, top,
+                    (xx - width / 2, y), (xx + width / 2, y), 3
+                )
+
+                for side in (-1, 1):
+                    tip = (
+                        xx + side * rng.randint(35, 85),
+                        y - rng.randint(20, 45)
+                    )
+                    pygame.draw.line(image, color, (xx, y), tip, 2)
+
+                    for k in range(3):
+                        bx = xx + (tip[0] - xx) * (k + 1) / 4
+                        by = y + (tip[1] - y) * (k + 1) / 4
+                        pygame.draw.polygon(
+                            image, color,
+                            [
+                                (bx, by),
+                                (bx + side * 32, by - 24),
+                                (bx + side * 16, by - 3)
+                            ]
+                        )
+
+    if kind in ("sakura", "autumn"):
+        trunk = (57, 38, 33)
+
+        for side in (-1, 1):
+            root_x = 35 if side == 1 else WIDTH - 35
+            pygame.draw.line(
+                image, trunk,
+                (root_x, HEIGHT), (root_x + side * 80, 20), 16
+            )
+
+            for _ in range(17):
+                y = rng.randrange(30, 550)
+                tx = root_x + side * rng.randint(60, 220)
+                ty = y - rng.randint(20, 90)
+
+                pygame.draw.line(
+                    image, trunk,
+                    (root_x + side * 45, y + 80), (tx, ty), 5
+                )
+
+                for _ in range(15):
+                    color = mix(accent, bottom, rng.random() * 0.4)
+                    pygame.draw.circle(
+                        image, color,
+                        (tx + rng.randint(-50, 50),
+                         ty + rng.randint(-35, 35)),
+                        rng.randint(3, 8)
+                    )
+
+    mist = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    for _ in range(18):
+        pygame.draw.ellipse(
+            mist, (*accent, 9),
+            (
+                rng.randint(-200, WIDTH),
+                rng.randint(150, HEIGHT),
+                rng.randint(200, 550),
+                rng.randint(25, 70)
+            )
+        )
+    image.blit(mist, (0, 0))
+
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((0, 8, 7, 32))
+    image.blit(shade, (0, 0))
+    return image
+
+
+def make_board_texture():
+    image = pygame.Surface((560, 610))
+    image.fill((79, 56, 31))
+
+    for y in range(6, 604):
+        color = mix((246, 230, 176), (217, 194, 138), y / 610)
+        pygame.draw.line(image, color, (6, y), (553, y))
+
+    rng = random.Random(42)
+
+    for _ in range(1000):
+        x = rng.randrange(10, 548)
+        y = rng.randrange(10, 600)
+        color = rng.choice([
+            (226, 207, 155),
+            (233, 214, 162),
+            (238, 221, 171)
+        ])
+        pygame.draw.line(
+            image, color,
+            (x, y), (min(549, x + rng.randint(2, 15)), y)
+        )
+
+    pygame.draw.rect(
+        image, GOLD, (2, 2, 556, 606), 3, border_radius=5
+    )
+    pygame.draw.rect(
+        image, (137, 107, 60), (9, 9, 542, 592), 1
+    )
+    return image
+
+
+def make_piece(piece):
+    image = pygame.Surface((66, 68), pygame.SRCALPHA)
+    side = RED if piece > 0 else BLACK
+    color = (166, 35, 36) if side == RED else (28, 79, 62)
+
+    pygame.draw.circle(image, (0, 0, 0, 70), (34, 37), 28)
+    pygame.draw.circle(image, (107, 84, 50), (33, 35), 27)
+    pygame.draw.circle(image, (199, 174, 115), (33, 33), 27)
+
+    for radius in range(25, 0, -1):
+        t = 1 - radius / 25
+        fill = mix((225, 213, 175), (255, 247, 215), t * 0.85)
+        pygame.draw.circle(image, fill, (33, 31), radius)
+
+    pygame.draw.circle(image, (255, 249, 223), (33, 31), 26, 2)
+    pygame.draw.circle(image, color, (33, 31), 23, 2)
+    pygame.draw.circle(image, (192, 170, 119), (33, 31), 19, 1)
+
+    symbol = HAN[side][abs(piece)] if han_path else SHORT[abs(piece)]
+    font = HAN_FONT if han_path else FONT
+
+    glyph = font.render(symbol, True, color)
+    image.blit(glyph, glyph.get_rect(center=(33, 30)))
+
+    pygame.draw.arc(
+        image, (255, 255, 233),
+        (9, 7, 48, 48), 0.45, 2.6, 2
+    )
+    return image
+
+
+BOARD_TEXTURE = make_board_texture()
+
+PIECES = {
+    side * kind: make_piece(side * kind)
+    for side in (RED, BLACK)
+    for kind in range(1, 8)
+}
+
+
+# ============================================================
+# QUẢN LÝ VÁN ĐẤU
+# ============================================================
+
+class Game:
+    def __init__(self):
+        self.level = 0
+        self.generation = 0
+        self.cancel = threading.Event()
+        self.results = queue.Queue()
+
+        self.background_index = random.randrange(len(THEMES))
+        self.background_cache = {}
+        self.load_background()
+
+        self.new_game()
+
+    def load_background(self):
+        index = self.background_index
+        if index not in self.background_cache:
+            self.background_cache[index] = make_background(index)
+        self.background = self.background_cache[index]
+
+    def change_background(self):
+        choices = [
+            i for i in range(len(THEMES))
+            if i != self.background_index
+        ]
+        self.background_index = random.choice(choices)
+        self.load_background()
+
+    def invalidate_jobs(self):
+        self.cancel.set()
+        self.cancel = threading.Event()
+        self.generation += 1
+
+    def new_game(self):
+        self.invalidate_jobs()
+
+        self.board = initial_board()
+        self.turn = RED
+        self.remaining = {RED: TOTAL_TIME, BLACK: TOTAL_TIME}
+
+        self.finished = False
+        self.paused = False
+        self.pause_started = None
+        self.thinking = False
+
+        self.selected = None
+        self.last_move = None
+        self.history = []
+        self.history_scroll = 0
+
+        self.undo_stack = []
+        self.undo_accepted = 0
+        self.undo_requested = set()
+        self.draw_requested = set()
+
+        self.pending_ai = None
+        self.hint = None
+        self.hint_requested = False
+        self.hint_status = "Gợi ý tự xuất hiện sau 30 giây suy nghĩ."
+
+        self.message = "Lượt của bạn — quân Đỏ."
+        self.note = "Mỗi bên 10 phút. Xin đi lại tối đa 2 lần được chấp nhận."
+        self.ai_info = "AI chưa phân tích."
+
+        self.counts = Counter()
+        self.counts[position_key(self.board, RED)] = 1
+        self.refresh_moves()
+
+        now = time.perf_counter()
+        self.last_clock = now
+        self.turn_started = now
+
+    def refresh_moves(self):
+        self.basic_moves = legal_moves(self.board, self.turn)
+        self.moves = legal_moves(self.board, self.turn, self.counts)
+        self.blocked_moves = set(self.basic_moves) - set(self.moves)
+        self.checked = in_check(self.board, self.turn)
+
+    def finish(self, message):
+        self.finished = True
+        self.thinking = False
+        self.selected = None
+        self.message = message
+        self.invalidate_jobs()
+
+    def charge_clock(self):
+        now = time.perf_counter()
+
+        if self.paused or self.finished:
+            self.last_clock = now
+            return
+
+        elapsed = now - self.last_clock
+        self.last_clock = now
+        self.remaining[self.turn] = max(
+            0, self.remaining[self.turn] - elapsed
+        )
+
+        if self.remaining[self.turn] <= 0:
+            self.finish(
+                "Bạn hết giờ — máy thắng."
+                if self.turn == RED
+                else "Máy hết giờ — bạn thắng!"
+            )
+
+    def toggle_pause(self):
+        if self.finished:
+            return
+
+        if not self.paused:
+            self.charge_clock()
+            if self.finished:
+                return
+
+            self.paused = True
+            self.pause_started = time.perf_counter()
+            self.saved_message = self.message
+            self.message = "Ván đấu đang tạm dừng."
+            self.thinking = False
+
+            self.invalidate_jobs()
+
+            if self.hint is None:
+                self.hint_requested = False
+
+        else:
+            now = time.perf_counter()
+            self.turn_started += now - self.pause_started
+            self.last_clock = now
+
+            self.paused = False
+            self.pause_started = None
+            self.message = self.saved_message
+
+            if self.turn == BLACK:
+                self.start_ai()
+
+    def start_ai(self):
+        if self.finished or self.paused:
+            return
+
+        self.thinking = True
+        token = self.generation
+        cancel = self.cancel
+        results = self.results
+
+        board = [row[:] for row in self.board]
+        counts = self.counts.copy()
+        level = self.level
+        pending = self.pending_ai
+
+        def worker():
+            try:
+                if pending is not None:
+                    before, move, previous_counts, index = pending
+                    comment = grade_move(
+                        [row[:] for row in before],
+                        move, previous_counts, cancel
+                    )
+
+                    if cancel.is_set():
+                        return
+                    results.put((token, "grade", (index, comment)))
+
+                _, depth_limit, seconds = LEVELS[level]
+                engine = Engine(seconds, cancel)
+                move, score, depth, _ = engine.search(
+                    board, BLACK, depth_limit, counts
+                )
+
+                if not cancel.is_set():
+                    results.put(
+                        (token, "ai", (move, score, depth, engine.nodes))
+                    )
+
+            except Exception as exc:
+                if not cancel.is_set():
+                    results.put((token, "error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_hint(self):
+        self.hint_requested = True
+        self.hint_status = "Đã suy nghĩ 30 giây: đang phân tích gợi ý..."
+
+        token = self.generation
+        cancel = self.cancel
+        results = self.results
+
+        board = [row[:] for row in self.board]
+        counts = self.counts.copy()
+
+        def worker():
+            try:
+                engine = Engine(3.0, cancel)
+                move, score, depth, _ = engine.search(
+                    board, RED, 5, counts
+                )
+
+                if not cancel.is_set():
+                    results.put((token, "hint", (move, depth)))
+
+            except Exception:
+                if not cancel.is_set():
+                    results.put((token, "hint_error", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def save_position(self):
+        return {
+            "board": [row[:] for row in self.board],
+            "history": [entry.copy() for entry in self.history],
+            "counts": self.counts.copy(),
+            "last_move": self.last_move,
+        }
+
+    def play_move(self, move, ai_depth=0):
+        self.charge_clock()
+
+        if self.finished or self.paused or move not in self.moves:
+            return
+
+        side = self.turn
+        name = move_name(self.board, move)
+
+        if side == RED:
+            self.undo_stack.append(self.save_position())
+
+            self.pending_ai = (
+                [row[:] for row in self.board],
+                move,
+                self.counts.copy(),
+                len(self.history)
+            )
+
+        self.invalidate_jobs()
+        make_move(self.board, move)
+
+        self.history.append({
+            "side": side,
+            "name": name,
+            "comment": (
+                "Đang chấm nước..."
+                if side == RED
+                else f"AI chọn · độ sâu hoàn thành {ai_depth}"
+            ),
+        })
+
+        self.last_move = move
+        self.selected = None
+        self.history_scroll = 0
+
+        self.hint = None
+        self.hint_requested = False
+        self.hint_status = "Gợi ý tự xuất hiện sau 30 giây suy nghĩ."
+
+        self.turn = -side
+        self.thinking = False
+
+        if self.turn == RED:
+            self.pending_ai = None
+
+        key = position_key(self.board, self.turn)
+        self.counts[key] += 1
+
+        now = time.perf_counter()
+        self.last_clock = now
+        self.turn_started = now
+
+        self.refresh_moves()
+
+        if not self.moves:
+            self.history[-1]["comment"] = "Nước kết thúc ván."
+
+            if self.basic_moves:
+                reason = "chỉ còn nước bị cấm lặp lần thứ ba"
+            else:
+                reason = "hết nước hợp lệ"
+
+            self.finish(
+                f"Bạn thắng! Đen {reason}."
+                if self.turn == BLACK
+                else f"Máy thắng! Đỏ {reason}."
+            )
+            return
+
+        if self.turn == BLACK:
+            self.message = (
+                "Đen bị chiếu — máy đang nghĩ..."
+                if self.checked
+                else "Máy đang suy nghĩ..."
+            )
+            self.start_ai()
+        else:
+            self.message = (
+                "Bạn đang bị chiếu!"
+                if self.checked
+                else "Lượt của bạn — quân Đỏ."
+            )
+
+    def can_request_undo(self):
+        return (
+            not self.finished
+            and not self.paused
+            and self.turn == RED
+            and bool(self.undo_stack)
+            and len(self.history) >= 2
+            and self.undo_accepted < MAX_UNDO
+            and position_key(self.board, self.turn) not in self.undo_requested
+        )
+
+    def request_undo(self):
+        self.charge_clock()
+
+        if not self.can_request_undo():
+            return
+
+        key = position_key(self.board, self.turn)
+        self.undo_requested.add(key)
+
+        black_advantage = evaluate(self.board, BLACK)
+
+        if self.checked:
+            self.note = "Máy từ chối đi lại: bạn đang bị chiếu."
+            return
+
+        if black_advantage > 180:
+            self.note = "Máy từ chối đi lại: đang có lợi thế rõ rệt."
+            return
+
+        if self.remaining[RED] < 20:
+            self.note = "Máy từ chối đi lại: bạn còn quá ít thời gian."
+            return
+
+        snapshot = self.undo_stack.pop()
+
+        self.invalidate_jobs()
+        self.board = [row[:] for row in snapshot["board"]]
+        self.history = [entry.copy() for entry in snapshot["history"]]
+        self.counts = snapshot["counts"].copy()
+        self.last_move = snapshot["last_move"]
+
+        self.turn = RED
+        self.selected = None
+        self.thinking = False
+        self.pending_ai = None
+        self.history_scroll = 0
+
+        self.hint = None
+        self.hint_requested = False
+        self.hint_status = "Gợi ý tự xuất hiện sau 30 giây suy nghĩ."
+
+        self.undo_accepted += 1
+        self.refresh_moves()
+
+        now = time.perf_counter()
+        self.last_clock = now
+        self.turn_started = now
+
+        self.message = "Máy đồng ý — bạn hãy chọn nước khác."
+        self.note = (
+            f"Đã thu hồi một cặp nước. "
+            f"Còn {MAX_UNDO - self.undo_accepted} lần; không hoàn thời gian."
+        )
+        self.ai_info = "Thế cờ đã được khôi phục."
+
+    def offer_draw(self):
+        self.charge_clock()
+
+        if self.finished or self.paused or self.turn != RED:
+            return
+
+        key = position_key(self.board, self.turn)
+        if key in self.draw_requested:
+            self.note = "Bạn đã cầu hòa tại thế cờ này."
+            return
+
+        self.draw_requested.add(key)
+
+        if len(self.history) < 12:
+            self.note = "Máy từ chối cầu hòa: ván đấu còn quá sớm."
+            return
+
+        if self.remaining[RED] < 30 and self.remaining[BLACK] > 60:
+            self.note = "Máy từ chối: đang có lợi thế thời gian."
+            return
+
+        advantage = evaluate(self.board, BLACK)
+        attackers = sum(
+            abs(p) in (HORSE, ROOK, CANNON, PAWN)
+            for row in self.board for p in row
+        )
+
+        accept = (
+            advantage < -180
+            or (abs(advantage) <= 100 and attackers <= 6)
+            or (self.remaining[BLACK] < 45 and advantage < 100)
+        )
+
+        if accept:
+            self.finish("Hòa! Máy đồng ý đề nghị cầu hòa.")
+            self.note = "Đánh giá dựa trên thế cờ và thời gian."
+        else:
+            self.note = "Máy từ chối cầu hòa: muốn tiếp tục thi đấu."
+
+    def resign(self):
+        self.charge_clock()
+
+        if not self.finished and not self.paused:
+            self.finish("Bạn đã xin thua — máy thắng.")
+            self.note = "Nhấn Ván mới để bắt đầu lại."
+
+    def update(self):
+        self.charge_clock()
+
+        if self.paused:
+            return
+
+        while True:
+            try:
+                token, kind, data = self.results.get_nowait()
+            except queue.Empty:
+                break
+
+            if token != self.generation or self.finished:
+                continue
+
+            if kind == "grade":
+                index, comment = data
+                if index < len(self.history):
+                    self.history[index]["comment"] = comment
+
+            elif kind == "ai":
+                move, score, depth, nodes = data
+
+                if self.turn != BLACK:
+                    continue
+
+                if score is None:
+                    self.ai_info = f"AI: d{depth} · {nodes:,} nút."
+                elif abs(score) > MATE // 2:
+                    self.ai_info = "Engine thấy biến thắng/thua quyết định."
+                else:
+                    self.ai_info = (
+                        f"Phân tích gần nhất: Đỏ {-score / 100:+.1f}"
+                        f" · d{depth} · {nodes:,} nút"
+                    )
+
+                if move in self.moves:
+                    self.play_move(move, depth)
+                else:
+                    self.finish("Engine không trả về nước hợp lệ.")
+
+            elif kind == "hint":
+                move, depth = data
+
+                if self.turn == RED and move in self.moves:
+                    if depth > 0:
+                        self.hint = move
+                        self.hint_status = (
+                            f"Gợi ý: {move_name(self.board, move)}. "
+                            f"Độ sâu {depth}; xem mũi tên xanh."
+                        )
+                    else:
+                        self.hint_status = (
+                            "Chưa đủ thời gian để phân tích gợi ý."
+                        )
+
+            elif kind == "hint_error":
+                self.hint_status = "Không phân tích được gợi ý lượt này."
+
+            elif kind == "error":
+                self.finish("Engine gặp lỗi — hãy tạo ván mới.")
+                self.note = str(data)[:110]
+
+        if (
+            not self.finished
+            and self.turn == RED
+            and not self.hint_requested
+            and time.perf_counter() - self.turn_started >= HINT_AFTER
+        ):
+            self.start_hint()
+
+    def click(self, pos):
+        self.charge_clock()
+
+        if BG_RECT.collidepoint(pos):
+            self.change_background()
+            return
+
+        if NEW_RECT.collidepoint(pos):
+            self.new_game()
+            return
+
+        for i, rect in enumerate(LEVEL_RECTS):
+            if rect.collidepoint(pos):
+                self.level = i
+                self.new_game()
+                return
+
+        if PAUSE_RECT.collidepoint(pos):
+            self.toggle_pause()
+            return
+
+        if self.finished or self.paused:
+            return
+
+        if UNDO_RECT.collidepoint(pos):
+            self.request_undo()
+            return
+
+        if DRAW_RECT.collidepoint(pos):
+            self.offer_draw()
+            return
+
+        if RESIGN_RECT.collidepoint(pos):
+            self.resign()
+            return
+
+        if self.turn != RED:
+            return
+
+        square = mouse_square(pos)
+        if square is None:
+            self.selected = None
+            return
+
+        r, c = square
+
+        if self.selected is not None:
+            sr, sc = self.selected
+            move = (sr, sc, r, c)
+
+            if move in self.moves:
+                self.play_move(move)
+                return
+
+            if move in self.blocked_moves:
+                self.note = (
+                    "Nước này bị khóa: tạo cùng thế cờ lần thứ ba. "
+                    "Hãy chọn nước khác."
+                )
+                return
+
+        self.selected = square if self.board[r][c] > 0 else None
+
+    def scroll_history(self, amount):
+        limit = max(0, len(self.history) - 4)
+        self.history_scroll = max(
+            0, min(limit, self.history_scroll + amount)
+        )
+
+    # ========================================================
+    # VẼ GIAO DIỆN
+    # ========================================================
+
+    def draw_clock(self, side, rect):
+        active = (
+            not self.finished
+            and not self.paused
+            and self.turn == side
+        )
+
+        panel(rect, (23, 40, 31), 240)
+
+        if active:
+            pygame.draw.rect(
+                screen, GOLD, rect, 2, border_radius=12
+            )
+
+        bx, by = rect.x + 30, rect.centery
+        color = (117, 46, 38) if side == RED else (39, 89, 64)
+
+        pygame.draw.circle(screen, color, (bx, by), 21)
+        pygame.draw.circle(screen, GOLD, (bx, by), 21, 2)
+
+        symbol = (
+            HAN[side][KING] if han_path
+            else ("R" if side == RED else "AI")
+        )
+        text(
+            symbol, bx, by, CREAM,
+            RIVER_FONT if han_path else SMALL,
+            center=True
+        )
+
+        name = "BẠN · QUÂN ĐỎ" if side == RED else "MÁY · QUÂN ĐEN"
+        text(name, rect.x + 63, rect.y + 8, CREAM, SMALL)
+
+        status = "ĐANG ĐI" if active else "ĐANG CHỜ"
+        if self.paused:
+            status = "TẠM DỪNG"
+        if self.finished:
+            status = "KẾT THÚC"
+
+        text(
+            status, rect.x + 63, rect.y + 32,
+            GREEN if active else MUTED, TINY
+        )
+
+        timer_rect = pygame.Rect(
+            rect.right - 142, rect.y + 5, 132, rect.h - 10
+        )
+        pygame.draw.rect(
+            screen, (13, 27, 21), timer_rect, border_radius=8
+        )
+        pygame.draw.rect(
+            screen, (123, 133, 81), timer_rect, 1, border_radius=8
+        )
+
+        color = (255, 110, 100) if self.remaining[side] < 60 else CREAM
+        text(
+            time_string(self.remaining[side]),
+            *timer_rect.center, color, TIME_FONT, center=True
+        )
+
+    def draw_board(self):
+        screen.blit(BOARD_TEXTURE, (25, 85))
+        ink = (133, 112, 70)
+
+        for r in range(10):
+            pygame.draw.line(
+                screen, ink, board_xy(r, 0), board_xy(r, 8), 2
+            )
+            text(r, 40, OY + r * CELL, ink, TINY, center=True)
+
+        for c in range(9):
+            text(
+                chr(65 + c), OX + c * CELL, 682,
+                ink, TINY, center=True
+            )
+
+            if c in (0, 8):
+                pygame.draw.line(
+                    screen, ink, board_xy(0, c), board_xy(9, c), 2
+                )
+            else:
+                pygame.draw.line(
+                    screen, ink, board_xy(0, c), board_xy(4, c), 2
+                )
+                pygame.draw.line(
+                    screen, ink, board_xy(5, c), board_xy(9, c), 2
+                )
+
+        for top in (0, 7):
+            pygame.draw.line(
+                screen, ink,
+                board_xy(top, 3), board_xy(top + 2, 5), 2
+            )
+            pygame.draw.line(
+                screen, ink,
+                board_xy(top, 5), board_xy(top + 2, 3), 2
+            )
+
+        for r, columns in [
+            (2, (1, 7)), (7, (1, 7)),
+            (3, (0, 2, 4, 6, 8)), (6, (0, 2, 4, 6, 8))
+        ]:
+            for c in columns:
+                x, y = board_xy(r, c)
+
+                for sx in (-1, 1):
+                    if (c == 0 and sx == -1) or (c == 8 and sx == 1):
+                        continue
+
+                    for sy in (-1, 1):
+                        pygame.draw.lines(
+                            screen, ink, False,
+                            [
+                                (x + sx * 13, y + sy * 5),
+                                (x + sx * 5, y + sy * 5),
+                                (x + sx * 5, y + sy * 13)
+                            ], 1
+                        )
+
+        river_y = OY + CELL * 4.5
+        text(
+            "楚 河" if han_path else "SO HA",
+            195, river_y, (129, 100, 58),
+            RIVER_FONT if han_path else FONT, center=True
+        )
+        text(
+            "漢 界" if han_path else "HAN GIOI",
+            420, river_y, (129, 100, 58),
+            RIVER_FONT if han_path else FONT, center=True
+        )
+
+        if self.last_move:
+            r1, c1, r2, c2 = self.last_move
+            for r, c in ((r1, c1), (r2, c2)):
+                x, y = board_xy(r, c)
+                pygame.draw.rect(
+                    screen, (79, 135, 122),
+                    (x - 28, y - 28, 56, 56),
+                    2, border_radius=9
+                )
+
+        if self.hint and not self.finished and self.turn == RED:
+            draw_arrow(self.hint)
+
+        checked_king = find_king(self.board, self.turn) if self.checked else None
+
+        for r in range(10):
+            for c in range(9):
+                piece = self.board[r][c]
+                if not piece:
+                    continue
+
+                x, y = board_xy(r, c)
+                screen.blit(PIECES[piece], (x - 33, y - 31))
+
+                if checked_king == (r, c):
+                    pygame.draw.circle(
+                        screen, (230, 78, 40), (x, y), 29, 3
+                    )
+
+        if self.selected:
+            sr, sc = self.selected
+            pygame.draw.circle(
+                screen, (28, 143, 90), board_xy(sr, sc), 29, 3
+            )
+
+            for r1, c1, r2, c2 in self.moves:
+                if (r1, c1) != self.selected:
+                    continue
+
+                point = board_xy(r2, c2)
+
+                if self.board[r2][c2]:
+                    pygame.draw.circle(
+                        screen, (28, 143, 90), point, 29, 3
+                    )
+                else:
+                    pygame.draw.circle(
+                        screen, (28, 143, 90), point, 7
+                    )
+
+            # Dấu X: nước bị cấm vì lặp lần thứ ba.
+            for r1, c1, r2, c2 in self.blocked_moves:
+                if (r1, c1) != self.selected:
+                    continue
+
+                x, y = board_xy(r2, c2)
+                pygame.draw.line(
+                    screen, (190, 62, 40),
+                    (x - 9, y - 9), (x + 9, y + 9), 3
+                )
+                pygame.draw.line(
+                    screen, (190, 62, 40),
+                    (x + 9, y - 9), (x - 9, y + 9), 3
+                )
+
+        if self.paused:
+            cover = pygame.Surface((560, 610), pygame.SRCALPHA)
+            cover.fill((6, 23, 19, 205))
+            screen.blit(cover, (25, 85))
+
+            text(
+                "TẠM DỪNG", 305, 340,
+                GOLD, TITLE, center=True
+            )
+            text(
+                "Đồng hồ và AI đã dừng",
+                305, 389, CREAM, FONT, center=True
+            )
+            text(
+                "Nhấn Space hoặc Tiếp tục",
+                305, 426, MUTED, SMALL, center=True
+            )
+
+    def draw_history(self):
+        text("LỊCH SỬ NƯỚC ĐI", 605, 346, GOLD, FONT)
+        text("Cuộn chuột để xem", 1010, 350, MUTED, TINY)
+
+        panel(HISTORY_RECT, (22, 42, 34), 235)
+
+        end = max(0, len(self.history) - self.history_scroll)
+        start = max(0, end - 4)
+
+        if not self.history:
+            text("Chưa có nước đi.", 620, 393, MUTED, SMALL)
+
+        for row, index in enumerate(range(start, end)):
+            entry = self.history[index]
+            y = HISTORY_RECT.y + 10 + row * 50
+            is_red = entry["side"] == RED
+            owner = "Đỏ" if is_red else "Đen"
+            color = (255, 157, 145) if is_red else CREAM
+
+            text(
+                f"{index // 2 + 1}. {owner}: {entry['name']}",
+                620, y, color, SMALL
+            )
+            text(entry["comment"], 635, y + 24, MUTED, TINY)
+
+    def draw(self):
+        screen.blit(self.background, (0, 0))
+        panel(pygame.Rect(595, 10, 580, 780), (15, 35, 28), 235)
+
+        self.draw_clock(BLACK, pygame.Rect(25, 16, 560, 58))
+        self.draw_board()
+        self.draw_clock(RED, pygame.Rect(25, 709, 560, 58))
+
+        text("KỲ ĐẠO · CỜ TƯỚNG", 612, 20, GOLD, TITLE)
+
+        for i, rect in enumerate(LEVEL_RECTS):
+            button(
+                rect, LEVELS[i][0],
+                (49, 98, 71) if i == self.level else (39, 63, 50),
+                selected=i == self.level
+            )
+
+        playing = not self.finished and not self.paused
+
+        button(NEW_RECT, "Ván mới [N]", (47, 98, 70))
+        button(
+            DRAW_RECT, "Cầu hòa", (77, 88, 61),
+            enabled=playing and self.turn == RED
+        )
+        button(
+            RESIGN_RECT, "Xin thua", (119, 55, 48),
+            enabled=playing
+        )
+        button(
+            PAUSE_RECT,
+            "Tiếp tục [Space]" if self.paused else "Tạm dừng [Space]",
+            (103, 80, 42),
+            enabled=not self.finished,
+            selected=self.paused
+        )
+
+        undo_label = (
+            "Đi lại: đã hết lượt"
+            if self.undo_accepted >= MAX_UNDO
+            else f"Xin đi lại ({MAX_UNDO - self.undo_accepted})"
+        )
+        button(
+            UNDO_RECT, undo_label, (52, 91, 90),
+            enabled=self.can_request_undo()
+        )
+        button(BG_RECT, "Nền ngẫu nhiên [B]", (75, 64, 106))
+
+        wrapped(
+            self.message, 613, 223, 540,
+            GOLD if self.finished or self.paused else TEXT,
+            SMALL, max_lines=2
+        )
+        wrapped(
+            self.note, 613, 267, 540,
+            MUTED, TINY, line_h=18, max_lines=2
+        )
+
+        score = evaluate(self.board, RED) / 100
+        if abs(score) < 0.5:
+            estimate = "Thế cờ: tương đối cân bằng."
+        elif score > 0:
+            estimate = f"Ước lượng tĩnh: Đỏ hơn ~{score:.1f} binh."
+        else:
+            estimate = f"Ước lượng tĩnh: Đen hơn ~{-score:.1f} binh."
+
+        text(estimate, 613, 308, GREEN, SMALL)
+        self.draw_history()
+
+        text("QUÂN SƯ · GỢI Ý", 613, 602, GOLD, FONT)
+        wrapped(
+            self.hint_status, 613, 633, 540,
+            GREEN if self.hint else TEXT,
+            SMALL, max_lines=2
+        )
+
+        if not self.finished and self.turn == RED:
+            reference = (
+                self.pause_started if self.paused
+                else time.perf_counter()
+            )
+            spent = max(0, int(reference - self.turn_started))
+
+            text(
+                f"Suy nghĩ: {spent}s"
+                + (" · đang tạm dừng" if self.paused else " · gợi ý sau 30s"),
+                613, 683, MUTED, TINY
+            )
+
+        text(self.ai_info, 613, 706, MUTED, TINY)
+
+        theme_name = THEMES[self.background_index][0]
+        text(
+            f"Nền {self.background_index + 1}/10: {theme_name}",
+            613, 728, GOLD, TINY
+        )
+
+        if not han_path:
+            text(
+                "Thiếu font Hán: thêm co_tuong_font.ttf rồi mở lại.",
+                613, 749, (255, 185, 120), TINY
+            )
+        else:
+            text(
+                "AI demo, chưa xác thực Elo · Cấm lặp thế lần thứ 3.",
+                613, 749, MUTED, TINY
+            )
+
+        text(
+            "Space: dừng/tiếp tục · B: đổi nền · N: ván mới · Esc: thoát",
+            613, 772, MUTED, TINY
+        )
+
+
+# ============================================================
+# VÒNG LẶP CHÍNH
+# ============================================================
+
+def main():
+    game = Game()
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        clock.tick(60)
+        game.update()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    game.click(event.pos)
+
+            elif event.type == pygame.MOUSEWHEEL:
+                if HISTORY_RECT.collidepoint(pygame.mouse.get_pos()):
+                    game.scroll_history(event.y)
+
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+
+                elif event.key == pygame.K_SPACE:
+                    game.toggle_pause()
+
+                elif event.key == pygame.K_b:
+                    game.change_background()
+
+                elif event.key == pygame.K_n:
+                    game.new_game()
+
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                    game.level = {
+                        pygame.K_1: 0,
+                        pygame.K_2: 1,
+                        pygame.K_3: 2,
+                    }[event.key]
+                    game.new_game()
+
+        game.draw()
+        pygame.display.flip()
+
+    game.cancel.set()
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
